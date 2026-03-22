@@ -106,19 +106,21 @@ export async function reloadAndPreviewManimCell(cellCode?: string, startLine?: n
  */
 export async function previewCode(code: string, startLine: number): Promise<void> {
   let progress: PreviewProgress | undefined;
+  let clipboardBuffer: string | undefined;
+  let shouldRestoreClipboard = false;
 
   try {
-    const clipboardBuffer = await vscode.env.clipboard.readText();
+    clipboardBuffer = await vscode.env.clipboard.readText();
     await ManimShell.instance.executeIPythonCommand(
       PREVIEW_COMMAND, startLine, true, {
 
         beforeCommandIssued: async () => {
           await vscode.env.clipboard.writeText(code);
+          shouldRestoreClipboard = true;
         },
 
         onCommandIssued: (shellStillExists) => {
-          Logger.debug(`📊 Command issued: ${PREVIEW_COMMAND}. Will restore clipboard`);
-          restoreClipboard(clipboardBuffer);
+          Logger.debug(`📊 Command issued: ${PREVIEW_COMMAND}`);
           if (shellStillExists) {
             Logger.debug("📊 Initializing preview progress");
             progress = new PreviewProgress();
@@ -137,6 +139,10 @@ export async function previewCode(code: string, startLine: number): Promise<void
 
       });
   } finally {
+    if (shouldRestoreClipboard && clipboardBuffer !== undefined) {
+      Logger.debug("📊 Preview command finished. Will restore clipboard");
+      restoreClipboard(clipboardBuffer);
+    }
     progress?.finish();
   }
 }
@@ -149,7 +155,11 @@ export async function previewCode(code: string, startLine: number): Promise<void
 function restoreClipboard(clipboardBuffer: string) {
   const timeout = vscode.workspace.getConfiguration("manim-notebook").clipboardTimeout;
   setTimeout(async () => {
-    await vscode.env.clipboard.writeText(clipboardBuffer);
+    try {
+      await vscode.env.clipboard.writeText(clipboardBuffer);
+    } catch (error) {
+      Logger.error(`❌ Failed to restore clipboard: ${error}`);
+    }
   }, timeout);
 }
 
