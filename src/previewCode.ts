@@ -9,6 +9,68 @@ import { ManimCellRanges } from "./pythonParsing";
 // \x0C: is Ctrl + L, which clears the terminal screen
 const PREVIEW_COMMAND = "\x0Ccheckpoint_paste()";
 
+/**
+ * A cancellable handle for the pending clipboard restore operation.
+ *
+ * Using a cancellation-flag object rather than `clearTimeout` avoids
+ * introducing additional TypeScript errors in environments where the
+ * Node.js timer types are not included in the tsconfig `lib`.
+ */
+interface PendingRestore {
+  cancelled: boolean;
+}
+
+/**
+ * Handle for the currently-pending clipboard restore operation, or
+ * `undefined` when no restore is scheduled.
+ */
+let pendingRestore: PendingRestore | undefined;
+
+/**
+ * The clipboard content that existed before the current preview sequence
+ * began (i.e. before any preview call in a rapid series wrote to the
+ * clipboard). Stored so that the very last preview in a rapid sequence still
+ * restores the user's true original clipboard rather than an intermediate
+ * "code_A" value that a previous preview had written.
+ *
+ * Reset to `undefined` once the restore timer actually fires.
+ */
+let previewSequenceOriginalClipboard: string | undefined;
+
+/**
+ * Cancels any pending clipboard restore operation.
+ *
+ * Must be called before writing new code to the clipboard (inside
+ * `beforeCommandIssued`) to prevent a stale restore from a previous preview
+ * from overwriting the newly-written content before `checkpoint_paste()`
+ * has had a chance to read it.
+ */
+function cancelPendingClipboardRestore(): void {
+  if (pendingRestore) {
+    pendingRestore.cancelled = true;
+    pendingRestore = undefined;
+  }
+}
+
+/**
+ * Returns the clipboard content that should be restored after the current
+ * preview finishes.
+ *
+ * If this is the first preview in a new sequence (no restore is pending and
+ * `previewSequenceOriginalClipboard` is not set), the current clipboard
+ * content is read and stored as the sequence-original.  Subsequent rapid
+ * previews inherit the same sequence-original so that restoring always
+ * brings back the user's clipboard from before any preview started.
+ */
+async function getClipboardBufferForPreview(): Promise<string> {
+  if (previewSequenceOriginalClipboard !== undefined) {
+    return previewSequenceOriginalClipboard;
+  }
+  const content = await vscode.env.clipboard.readText();
+  previewSequenceOriginalClipboard = content;
+  return content;
+}
+
 function parsePreviewCellArgs(cellCode?: string, startLine?: number) {
   let startLineParsed: number | undefined = startLine;
 
@@ -106,19 +168,32 @@ export async function reloadAndPreviewManimCell(cellCode?: string, startLine?: n
  */
 export async function previewCode(code: string, startLine: number): Promise<void> {
   let progress: PreviewProgress | undefined;
+  let clipboardBuffer: string | undefined;
 
   try {
-    const clipboardBuffer = await vscode.env.clipboard.readText();
     await ManimShell.instance.executeIPythonCommand(
       PREVIEW_COMMAND, startLine, true, {
 
         beforeCommandIssued: async () => {
+          // Cancel any restore timer from a previous preview so it cannot
+          // fire between now and when checkpoint_paste() reads the clipboard.
+          cancelPendingClipboardRestore();
+          clipboardBuffer = await getClipboardBufferForPreview();
           await vscode.env.clipboard.writeText(code);
         },
 
         onCommandIssued: (shellStillExists) => {
           Logger.debug(`📊 Command issued: ${PREVIEW_COMMAND}. Will restore clipboard`);
-          restoreClipboard(clipboardBuffer);
+          if (clipboardBuffer !== undefined) {
+            restoreClipboard(clipboardBuffer);
+          } else {
+            // This can only happen if beforeCommandIssued was skipped (e.g.
+            // stopEarly fired between retrieveOrInitActiveShell and
+            // beforeCommandIssued), which would also mean exec() was not
+            // called. In practice, onCommandIssued and beforeCommandIssued are
+            // always paired, but we guard here defensively.
+            Logger.debug("📊 clipboardBuffer is undefined, skipping clipboard restore");
+          }
           if (shellStillExists) {
             Logger.debug("📊 Initializing preview progress");
             progress = new PreviewProgress();
@@ -144,11 +219,22 @@ export async function previewCode(code: string, startLine: number): Promise<void
 /**
  * Restores the clipboard content after a user-defined timeout.
  *
+ * Cancels any previously-scheduled restore before scheduling a new one to
+ * ensure only one restore is active at a time.
+ *
  * @param clipboardBuffer The content to restore.
  */
 function restoreClipboard(clipboardBuffer: string) {
+  cancelPendingClipboardRestore();
+  const restore: PendingRestore = { cancelled: false };
+  pendingRestore = restore;
   const timeout = vscode.workspace.getConfiguration("manim-notebook").clipboardTimeout;
   setTimeout(async () => {
+    if (restore.cancelled) {
+      return;
+    }
+    pendingRestore = undefined;
+    previewSequenceOriginalClipboard = undefined;
     await vscode.env.clipboard.writeText(clipboardBuffer);
   }, timeout);
 }
