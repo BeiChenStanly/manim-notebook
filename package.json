@@ -29,7 +29,7 @@
   "activationEvents": [
     "onLanguage:python"
   ],
-  "main": "./dist/extension.js",
+  "main": "./out-test/src/extension.js",
   "contributes": {
     "commands": [
       {
@@ -125,6 +125,24 @@
           "type": "number",
           "default": 650,
           "markdownDescription": "Configures the number of milliseconds (ms) to wait before your clipboard is restored. (Your clipboard is used to temporarily copy the selected code to be accessible by Manim)."
+        },
+        "manim-notebook.clipboardSyncDelayWindows": {
+          "type": "number",
+          "default": 120,
+          "minimum": 0,
+          "markdownDescription": "Configures the clipboard sync delay in milliseconds before issuing checkpoint_paste() on Windows. Increase this if clipboard content is occasionally stale during preview."
+        },
+        "manim-notebook.clipboardSyncDelayMac": {
+          "type": "number",
+          "default": 80,
+          "minimum": 0,
+          "markdownDescription": "Configures the clipboard sync delay in milliseconds before issuing checkpoint_paste() on macOS. Increase this if clipboard content is occasionally stale during preview."
+        },
+        "manim-notebook.clipboardSyncDelayLinux": {
+          "type": "number",
+          "default": 80,
+          "minimum": 0,
+          "markdownDescription": "Configures the clipboard sync delay in milliseconds before issuing checkpoint_paste() on Linux. Increase this if clipboard content is occasionally stale during preview."
         },
         "manim-notebook.confirmKillingActiveSceneToStartNewOne": {
           "type": "boolean",

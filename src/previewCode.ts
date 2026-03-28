@@ -8,6 +8,11 @@ import { ManimCellRanges } from "./pythonParsing";
 
 // \x0C: is Ctrl + L, which clears the terminal screen
 const PREVIEW_COMMAND = "\x0Ccheckpoint_paste()";
+const DEFAULT_CLIPBOARD_SYNC_DELAY_MS = {
+  win32: 120,
+  darwin: 80,
+  linux: 80,
+};
 
 function parsePreviewCellArgs(cellCode?: string, startLine?: number) {
   let startLineParsed: number | undefined = startLine;
@@ -106,19 +111,25 @@ export async function reloadAndPreviewManimCell(cellCode?: string, startLine?: n
  */
 export async function previewCode(code: string, startLine: number): Promise<void> {
   let progress: PreviewProgress | undefined;
+  let clipboardBuffer: string | undefined;
+  let shouldRestoreClipboard = false;
+  const clipboardSyncDelayMs = getClipboardSyncDelayMs();
 
   try {
-    const clipboardBuffer = await vscode.env.clipboard.readText();
+    clipboardBuffer = await vscode.env.clipboard.readText();
     await ManimShell.instance.executeIPythonCommand(
       PREVIEW_COMMAND, startLine, true, {
 
         beforeCommandIssued: async () => {
           await vscode.env.clipboard.writeText(code);
+          shouldRestoreClipboard = true;
+          if (clipboardSyncDelayMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, clipboardSyncDelayMs));
+          }
         },
 
         onCommandIssued: (shellStillExists) => {
-          Logger.debug(`📊 Command issued: ${PREVIEW_COMMAND}. Will restore clipboard`);
-          restoreClipboard(clipboardBuffer);
+          Logger.debug(`📊 Command issued: ${PREVIEW_COMMAND}`);
           if (shellStillExists) {
             Logger.debug("📊 Initializing preview progress");
             progress = new PreviewProgress();
@@ -137,8 +148,37 @@ export async function previewCode(code: string, startLine: number): Promise<void
 
       });
   } finally {
+    if (shouldRestoreClipboard && clipboardBuffer !== undefined) {
+      Logger.debug(`📊 Preview command finished. Will restore clipboard`);
+      restoreClipboard(clipboardBuffer);
+    }
     progress?.finish();
   }
+}
+
+function getClipboardSyncDelayMs(): number {
+  const config = vscode.workspace.getConfiguration("manim-notebook");
+
+  let settingName: string;
+  let defaultDelayMs: number;
+
+  if (process.platform === "win32") {
+    settingName = "clipboardSyncDelayWindows";
+    defaultDelayMs = DEFAULT_CLIPBOARD_SYNC_DELAY_MS.win32;
+  } else if (process.platform === "darwin") {
+    settingName = "clipboardSyncDelayMac";
+    defaultDelayMs = DEFAULT_CLIPBOARD_SYNC_DELAY_MS.darwin;
+  } else {
+    settingName = "clipboardSyncDelayLinux";
+    defaultDelayMs = DEFAULT_CLIPBOARD_SYNC_DELAY_MS.linux;
+  }
+
+  const configuredDelayMs = config.get<number>(settingName, defaultDelayMs);
+  if (configuredDelayMs < 0) {
+    Logger.warn(`⚠️ Clipboard sync delay was negative (${configuredDelayMs}), clamping to 0`);
+    return 0;
+  }
+  return configuredDelayMs;
 }
 
 /**
@@ -149,7 +189,11 @@ export async function previewCode(code: string, startLine: number): Promise<void
 function restoreClipboard(clipboardBuffer: string) {
   const timeout = vscode.workspace.getConfiguration("manim-notebook").clipboardTimeout;
   setTimeout(async () => {
-    await vscode.env.clipboard.writeText(clipboardBuffer);
+    try {
+      await vscode.env.clipboard.writeText(clipboardBuffer);
+    } catch (error) {
+      Logger.error(`❌ Failed to restore clipboard: ${error}`);
+    }
   }, timeout);
 }
 
