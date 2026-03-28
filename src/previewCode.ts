@@ -124,7 +124,7 @@ export async function previewCode(code: string, startLine: number): Promise<void
           await vscode.env.clipboard.writeText(code);
           shouldRestoreClipboard = true;
           if (clipboardSyncDelayMs > 0) {
-            await new Promise((resolve) => setTimeout(resolve, clipboardSyncDelayMs));
+            await new Promise(resolve => setTimeout(resolve, clipboardSyncDelayMs));
           }
         },
 
@@ -149,7 +149,7 @@ export async function previewCode(code: string, startLine: number): Promise<void
       });
   } finally {
     if (shouldRestoreClipboard && clipboardBuffer !== undefined) {
-      Logger.debug(`📊 Preview command finished. Will restore clipboard`);
+      Logger.debug("📊 Preview command finished. Will restore clipboard");
       restoreClipboard(clipboardBuffer);
     }
     progress?.finish();
