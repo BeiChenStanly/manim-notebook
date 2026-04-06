@@ -29,7 +29,7 @@
   "activationEvents": [
     "onLanguage:python"
   ],
-  "main": "./dist/extension.js",
+  "main": "./out-test/src/extension.js",
   "contributes": {
     "commands": [
       {

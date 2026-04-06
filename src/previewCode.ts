@@ -106,19 +106,115 @@ export async function reloadAndPreviewManimCell(cellCode?: string, startLine?: n
  */
 export async function previewCode(code: string, startLine: number): Promise<void> {
   let progress: PreviewProgress | undefined;
+  let clipboardBuffer: string | undefined;
+  let shouldRestoreClipboard = false;
+  let injectedClipboardCode: string | undefined;
+  let sawPreviewCommandEcho = false;
+  let restoreInProgress = false;
+  let restoreCompleted = false;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+
+  const clearRestoreTimeout = () => {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+      timeoutHandle = undefined;
+    }
+  };
+
+  const canonicalizeClipboardText = (text: string) =>
+    text.replace(/\r\n/g, "\n").trimEnd();
+
+  const wait = async (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+  const isOnlyPreviewCommandEcho = (data: string) => {
+    const lines = data.split("\n")
+      .map(line => line.trim())
+      .filter(line => line.length > 0);
+    if (lines.length === 0) {
+      return true;
+    }
+
+    return lines.every(line => (
+      line.includes("checkpoint_paste()")
+      || /^In \[\d+\]:\s*$/.test(line)
+    ));
+  };
+
+  const scheduleRestoreFallback = () => {
+    if (timeoutHandle || restoreCompleted || !shouldRestoreClipboard) {
+      return;
+    }
+
+    const timeout = vscode.workspace
+      .getConfiguration("manim-notebook").clipboardTimeout;
+    timeoutHandle = setTimeout(() => {
+      timeoutHandle = undefined;
+      void tryRestoreClipboard("timeout-retry");
+    }, timeout);
+  };
+
+  const tryRestoreClipboard = async (reason: string) => {
+    if (
+      restoreCompleted || restoreInProgress
+      || !shouldRestoreClipboard || clipboardBuffer === undefined
+    ) {
+      return;
+    }
+
+    restoreInProgress = true;
+    try {
+      if (injectedClipboardCode === undefined) {
+        return;
+      }
+      const currentClipboard = await vscode.env.clipboard.readText();
+      if (
+        canonicalizeClipboardText(currentClipboard)
+        !== canonicalizeClipboardText(injectedClipboardCode)
+      ) {
+        Logger.debug(
+          `📊 Skipping clipboard restore (${reason}), clipboard changed externally`,
+        );
+        restoreCompleted = true;
+        shouldRestoreClipboard = false;
+        clearRestoreTimeout();
+        return;
+      }
+
+      await vscode.env.clipboard.writeText(clipboardBuffer);
+      Logger.debug(`📊 Clipboard restored (${reason})`);
+      restoreCompleted = true;
+      shouldRestoreClipboard = false;
+      clearRestoreTimeout();
+    } catch (error) {
+      Logger.error(`❌ Failed to restore clipboard: ${error}`);
+    } finally {
+      restoreInProgress = false;
+    }
+  };
+
+  const retryRestoreClipboard = async (reason: string, attempts = 4) => {
+    for (let i = 0; i < attempts; i++) {
+      await tryRestoreClipboard(reason);
+      if (restoreCompleted || !shouldRestoreClipboard) {
+        return;
+      }
+      await wait(80);
+    }
+  };
 
   try {
-    const clipboardBuffer = await vscode.env.clipboard.readText();
+    clipboardBuffer = await vscode.env.clipboard.readText();
     await ManimShell.instance.executeIPythonCommand(
       PREVIEW_COMMAND, startLine, true, {
 
         beforeCommandIssued: async () => {
           await vscode.env.clipboard.writeText(code);
+          injectedClipboardCode = await vscode.env.clipboard.readText();
+          shouldRestoreClipboard = true;
         },
 
         onCommandIssued: (shellStillExists) => {
-          Logger.debug(`📊 Command issued: ${PREVIEW_COMMAND}. Will restore clipboard`);
-          restoreClipboard(clipboardBuffer);
+          Logger.debug(`📊 Command issued: ${PREVIEW_COMMAND}`);
           if (shellStillExists) {
             Logger.debug("📊 Initializing preview progress");
             progress = new PreviewProgress();
@@ -129,6 +225,14 @@ export async function previewCode(code: string, startLine: number): Promise<void
 
         onData: (data) => {
           progress?.reportOnData(data);
+
+          if (!sawPreviewCommandEcho && data.includes("checkpoint_paste()")) {
+            sawPreviewCommandEcho = true;
+          }
+
+          if (sawPreviewCommandEcho && !isOnlyPreviewCommandEcho(data)) {
+            void retryRestoreClipboard("post-preview-output", 2);
+          }
         },
 
         onReset: () => {
@@ -137,20 +241,13 @@ export async function previewCode(code: string, startLine: number): Promise<void
 
       });
   } finally {
+    if (!restoreCompleted && shouldRestoreClipboard && sawPreviewCommandEcho) {
+      scheduleRestoreFallback();
+    } else {
+      clearRestoreTimeout();
+    }
     progress?.finish();
   }
-}
-
-/**
- * Restores the clipboard content after a user-defined timeout.
- *
- * @param clipboardBuffer The content to restore.
- */
-function restoreClipboard(clipboardBuffer: string) {
-  const timeout = vscode.workspace.getConfiguration("manim-notebook").clipboardTimeout;
-  setTimeout(async () => {
-    await vscode.env.clipboard.writeText(clipboardBuffer);
-  }, timeout);
 }
 
 /**
